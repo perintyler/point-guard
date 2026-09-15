@@ -1,0 +1,12 @@
+allowBuilds:
+  better-sqlite3: set this to true or false
+  esbuild: set this to true or false
+# This repo is a single package, not a workspace -- but pnpm 10+ reads
+# onlyBuiltDependencies from here rather than package.json's "pnpm" field
+# (which it ignores with a warning). Without it, every install and every
+# `pnpm exec` fails with ERR_PNPM_IGNORED_BUILDS, which blocks tsc and
+# vitest rather than just warning about native builds. Same list and same
+# reason as the barry monorepo's own pnpm-workspace.yaml.
+onlyBuiltDependencies:
+  - better-sqlite3
+  - esbuild
