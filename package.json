@@ -1,0 +1,45 @@
+{
+  "name": "@barry-rocks/point-guard-bag",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:unit": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "dev:web": "tsx --watch web-server/src/index.ts",
+    "start:web": "tsx web-server/src/index.ts"
+  },
+  "dependencies": {
+    "@barry-rocks/agent-runtime": "link:../../barry/packages/agent-runtime",
+    "@barry-rocks/bags": "link:../../barry/packages/bags",
+    "@barry-rocks/db": "link:../../barry/packages/db",
+    "@barry-rocks/file-tracker": "link:../../barry/packages/file-tracker",
+    "@barry-rocks/json-schema": "link:../../barry/packages/json-schema",
+    "@barry-rocks/locks-bag": "link:../../barry/bags/system/locks",
+    "@barry-rocks/logger": "link:../../barry/packages/logger",
+    "@barry-rocks/secrets": "link:../../barry/packages/secrets",
+    "@barry-rocks/session-client": "link:../../barry/packages/session-client",
+    "@barry-rocks/tools": "link:../../barry/packages/tools",
+    "@barry-rocks/usage-telemetry": "link:../../barry/packages/usage-telemetry",
+    "better-sqlite3": "12.10.0",
+    "express": "4.22.1",
+    "ws": "8.21.0",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "7.6.13",
+    "@types/express": "4.17.21",
+    "@types/node": "22.15.0",
+    "@types/ws": "8.5.13",
+    "tsx": "4.23.12",
+    "typescript": "5.9.3",
+    "vitest": "4.1.0"
+  },
+  "main": "tools.ts",
+  "exports": {
+    ".": "./tools.ts",
+    "./store": "./src/store.ts",
+    "./contracts": "./src/contracts.ts"
+  }
+}

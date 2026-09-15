@@ -1,0 +1,120 @@
+/* ============================================================
+   Point Guard -- barryLight paper, ink, antique gold spent only
+   on the active thing. Hairlines over boxes, whitespace over
+   chrome. Tokens match bags/actions and bags/plans so the whole
+   family of phone-fallback web apps reads as one thing.
+   ============================================================ */
+:root {
+  --bg: #faf9f7;
+  --surface: #ffffff;
+  --ink: #1c1917;
+  --muted: #57534e;
+  --faint: #a8a29e;
+  --line: #eae6df;
+  --accent: #c49332;
+  --ok: #14805a;
+  --warn: #b45309;
+  --err: #b91c1c;
+  --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --mono: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--surface); color: var(--ink);
+  font: 15px/1.65 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+button, a, input, textarea { touch-action: manipulation; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+[hidden] { display: none !important; }
+
+/* ---------- header ---------- */
+header {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 16px; padding: 22px 26px 18px;
+  max-width: 720px; margin: 0 auto;
+}
+h1 { font: 600 15px/1 var(--sans); letter-spacing: -0.01em; margin: 0; }
+.meta { font: 400 12px/1 var(--sans); color: var(--faint); }
+
+main { max-width: 720px; margin: 0 auto; padding: 0 26px 60px; }
+h2 { font: 600 13px/1.4 var(--sans); letter-spacing: -0.01em; margin: 28px 0 10px; }
+h3 { font: 500 12px/1.4 var(--sans); color: var(--muted); margin: 22px 0 8px; }
+
+/* ---------- book rows ---------- */
+.row {
+  display: block; width: 100%; text-align: left;
+  border-bottom: 1px solid var(--line);
+  padding: 12px 0;
+}
+.row:last-child { border-bottom: 0; }
+.row-head { display: flex; align-items: center; gap: 8px; }
+.row-name { font: 500 13px/1.4 var(--mono); letter-spacing: -0.01em; }
+.row-repo { font: 400 12px/1.5 var(--sans); color: var(--muted); margin-top: 3px; }
+.row-branch { font: 400 12px/1 var(--mono); color: var(--faint); }
+.row-meta {
+  font: 400 12px/1.5 var(--sans); color: var(--faint); margin-top: 5px;
+  display: flex; flex-wrap: wrap; gap: 4px 14px;
+}
+.row-flag { font: 400 12px/1.5 var(--sans); color: var(--warn); margin-top: 5px; }
+.row[data-status="conflicted"] .row-flag { color: var(--err); }
+
+/* Status is carried by a word plus a dot, never colour alone. */
+.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; flex: none; }
+.dot.ok         { background: var(--ok); }
+.dot.stuck      { background: var(--warn); }
+.dot.conflicted { background: var(--err); }
+
+/* ---------- empty / error states ---------- */
+.state {
+  padding: 30px 0; text-align: center;
+  font: 400 13px/1.6 var(--sans); color: var(--faint);
+}
+.state.error { color: var(--err); }
+
+/* ---------- message form ---------- */
+#message-form { display: flex; flex-direction: column; gap: 10px; }
+textarea {
+  width: 100%; font: 400 14px/1.5 var(--sans); color: var(--ink);
+  background: var(--bg); border: 1px solid var(--line); border-radius: 7px;
+  padding: 10px 12px; outline: none; appearance: none; -webkit-appearance: none;
+  resize: vertical; min-height: 64px;
+}
+textarea:focus { border-color: var(--accent); background: var(--surface); }
+
+.go {
+  font: 500 14px/1 var(--sans); color: var(--surface);
+  background: var(--ink); border: 0; border-radius: 8px;
+  padding: 12px; cursor: pointer; align-self: flex-start; min-width: 110px;
+}
+.go:hover:not(:disabled) { background: var(--accent); }
+.go:disabled { opacity: 0.5; cursor: default; }
+
+.report {
+  font: 400 13px/1.7 var(--sans); color: var(--ink);
+  background: var(--bg); border-radius: 8px; padding: 14px 16px;
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 40vh; overflow-y: auto; margin-top: 4px;
+}
+
+/* ---------- message history ---------- */
+.hist-item { border-bottom: 1px solid var(--line); padding: 10px 0; }
+.hist-item:last-child { border-bottom: 0; }
+.hist-q { font: 500 13px/1.5 var(--sans); color: var(--ink); }
+.hist-a { font: 400 13px/1.6 var(--sans); color: var(--muted); margin-top: 4px; white-space: pre-wrap; }
+.hist-time { font: 400 11px/1 var(--sans); color: var(--faint); margin-top: 5px; }
+
+/* ---------- toast ---------- */
+#toast {
+  position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
+  background: var(--ink); color: var(--surface);
+  font: 400 13px/1.4 var(--sans); padding: 11px 16px; border-radius: 8px;
+  max-width: 88vw; z-index: 20;
+}
+#toast.err { background: var(--err); }
+
+@media (max-width: 560px) {
+  header, main { padding-left: 18px; padding-right: 18px; }
+}

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Point Guard</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/app.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡</text></svg>">
+</head>
+<body>
+  <header>
+    <h1>Point Guard</h1>
+    <span id="book-meta" class="meta"></span>
+  </header>
+
+  <main>
+    <!-- The book: every session point-guard is watching. -->
+    <section id="book-view">
+      <div id="book" aria-live="polite"></div>
+    </section>
+
+    <!-- Message point-guard, and a scrollback of past exchanges. -->
+    <section id="message-view">
+      <h2>Ask point-guard</h2>
+      <form id="message-form">
+        <textarea id="message-input" rows="3" placeholder="What's going on with the scout session?" autocomplete="off" spellcheck="false"></textarea>
+        <button id="message-send" class="go" type="submit">Send</button>
+      </form>
+      <div id="message-reply" class="report" hidden></div>
+      <h3>Recent</h3>
+      <div id="message-history" aria-live="polite"></div>
+    </section>
+  </main>
+
+  <div id="toast" role="status" aria-live="polite" hidden></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

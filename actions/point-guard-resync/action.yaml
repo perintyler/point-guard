@@ -1,0 +1,10 @@
+version: 1
+name: point-guard-resync
+description: Check point-guard's recovery state after a restart or outage, and manually re-drive anything still queued or stuck.
+prompt:
+  format: file
+  path: resync.md
+requires:
+  bins: [curl]
+slash_command: true
+command_description: Resume point-guard's queued work after a restart
