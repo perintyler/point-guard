@@ -89,19 +89,10 @@ services:
     run-at-load: true
     keep-alive: true
 
-apps:
-  PointGuard:
-    description: Watch the book of active sessions and message point-guard's supervisor
-    platform: macos
-    build:
-      command: point-guard-macos/app/build.sh
-      output: point-guard-macos/app/.build/PointGuard.app
-    bundle-id: com.barry.point-guard
-    # Not a login item, and no menu bar icon -- the same call BarryActions
-    # makes: this is a status dashboard checked occasionally, not something
-    # that needs constant menu-bar presence, and the menu bar already has
-    # BarrySessions.
-    login-item: false
+# No `apps:` block. The macOS client is its own repo now
+# (github.com/perintyler/point-guard-macos), so its build.sh is not on a path
+# this manifest can name -- a bag can only declare an app it contains. It is
+# installed from there, and jalen-brunson pins the pair together.
 
 # No `traits:` block. The auto-trait `point-guard` (readwrite over the
 # namespace) is exactly right; hand-declaring it would duplicate the name —

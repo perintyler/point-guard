@@ -64,6 +64,15 @@ only), so it was never a candidate for `bag.yaml`.
 
 ## Tests
 
+**`vitest.config.ts` is load-bearing for more than timeouts.** It inlines
+`testDatabaseEnv()` from `@barry-rocks/db/test-db-url`, which pins the test
+database so no suite can reach production. `getDatabaseUrl()` short-circuits
+on `BARRY_DATABASE_URL` before it reads `BARRY_DATABASE_NAME`, and dev shells
+export the production URL -- so removing that import does not fail, it
+quietly points the whole suite at prod. It was nearly lost during extraction
+(it used to arrive from the monorepo's vitest.base.config.ts) and is the one
+config here whose absence would be silent and destructive.
+
 ```bash
 pnpm test   # vitest, the TypeScript surface
 swift test  # from point-guard-macos/app, the macOS client
