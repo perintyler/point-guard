@@ -20,12 +20,59 @@
  */
 import { ollamaChat as chat, ModelUnavailableError } from "@barry-rocks/agent-runtime";
 import { createLogger } from "@barry-rocks/logger";
+import { resolveMessageCredentials } from "./message-key.js";
 import type { Debrief, DebriefNarrative } from "./debrief.js";
 
 const log = createLogger("point-guard:debrief-narrative");
 
+/** The local fallback model. */
 export const NARRATIVE_MODEL = "qwen3:4b";
-export const NARRATIVE_KEEP_ALIVE = "60s";
+
+/** The primary. Same model and credential POST /message already uses. */
+export const NARRATIVE_HOSTED_MODEL = "gpt-5.4-mini";
+
+/**
+ * How often the narrative tick runs. Lives here, next to the keep-alive it
+ * constrains, rather than in the server -- the two are one decision and were
+ * previously separated by a module boundary, which is how they came to
+ * contradict each other. `assertKeepAliveOutlivesInterval` below is the
+ * mechanism; this adjacency is the reminder.
+ */
+export const NARRATIVE_INTERVAL_MS = 300_000;
+
+/**
+ * How long Ollama keeps the model resident after a call.
+ *
+ * MUST outlive NARRATIVE_INTERVAL_MS. This was "60s" against a 300s tick,
+ * which meant Ollama evicted the model four minutes before every single
+ * call, so each one paid a cold start -- and the narrative NEVER generated
+ * once in production (0 rows, nothing but timeouts in the log) from the day
+ * it shipped.
+ *
+ * Measured against the live daemon with the real 2,756-char prompt:
+ *
+ *   cold start (what production did every tick):  150s, TIMED OUT
+ *   warm model, same prompt:                       69.7s, succeeded
+ *
+ * A keep-alive shorter than the interval that drives it can only ever be
+ * self-defeating: the model is guaranteed to be gone when the next call
+ * arrives. The margin here is deliberate -- the tick is not a precise clock,
+ * and a keep-alive merely EQUAL to the interval would race it.
+ */
+export const NARRATIVE_KEEP_ALIVE = "10m";
+
+/** Parse Ollama's keep-alive spelling ("60s", "10m", "1h") to milliseconds. */
+export function keepAliveMs(spec: string): number {
+  const match = /^(\d+)(ms|s|m|h)$/.exec(spec.trim());
+  if (!match) throw new Error(`unparseable keep-alive: ${spec}`);
+  const value = Number(match[1]);
+  switch (match[2]) {
+    case "ms": return value;
+    case "s": return value * 1000;
+    case "m": return value * 60_000;
+    default: return value * 3_600_000;
+  }
+}
 
 /**
  * Wall-clock ceiling for one narrative call.
@@ -38,6 +85,23 @@ export const NARRATIVE_KEEP_ALIVE = "60s";
  * and say plainly in the log what a timeout actually was.
  */
 export const NARRATIVE_TIMEOUT_MS = 90_000;
+
+/**
+ * Hard ceiling on tokens generated.
+ *
+ * The prompt asks for two to four sentences and the model has repeatedly
+ * ignored it -- once with 5,681 characters of markdown tables, routinely
+ * with a long `<think>` preamble that `think: false` does not suppress.
+ * A prompt is a request; this is the constraint.
+ *
+ * The number comes from measurement, not taste. qwen3:4b on this machine
+ * runs ~30 tokens/sec under load, and a real answer measured 222-339
+ * tokens. So 400 leaves comfortable room for the answer while capping the
+ * worst case near 13s -- well inside NARRATIVE_TIMEOUT_MS, where an
+ * unbounded run at 2,700+ tokens would exceed it. Bounding generation is
+ * what makes the timeout a backstop rather than the primary failure mode.
+ */
+export const NARRATIVE_NUM_PREDICT = 400;
 
 /**
  * Longest narrative we will store.
@@ -82,7 +146,16 @@ export function narrativePrompt(debrief: Debrief): string {
     lines.push("Sessions:");
     for (const s of debrief.sessions.slice(0, 25)) {
       const where = s.repoName ?? "no repo";
-      const doing = s.latestSummary ? ` — ${s.latestSummary.replace(/\s+/g, " ").slice(0, 160)}` : "";
+      // Summaries only for sessions that are NOT ok, and short even then.
+      // These were 160 chars for every session and made up most of a
+      // 2,756-char prompt, which is what pushed the call past its budget on
+      // a loaded host. The prose is about the TEAM; a healthy session's
+      // summary is already rendered per-row by every client, so spending
+      // prompt on it here buys nothing and costs generation time.
+      const doing =
+        s.status !== "ok" && s.latestSummary
+          ? ` — ${s.latestSummary.replace(/\s+/g, " ").slice(0, 80)}`
+          : "";
       const flag = s.status === "ok" ? "" : ` [${s.status}: ${s.flaggedReason ?? "no reason"}]`;
       lines.push(`- ${s.name} (${where})${flag}${doing}`);
     }
@@ -142,7 +215,11 @@ export function stripReasoning(raw: string): string {
   return text.trim();
 }
 
-export async function generateNarrative(
+/**
+ * The local path. Kept as a FALLBACK, not the primary -- see
+ * generateNarrative below for why it lost that job.
+ */
+export async function generateNarrativeLocally(
   debrief: Debrief,
   options?: { model?: string; baseUrl?: string },
 ): Promise<DebriefNarrative | null> {
@@ -153,6 +230,7 @@ export async function generateNarrative(
       model,
       keepAlive: NARRATIVE_KEEP_ALIVE,
       timeoutMs: NARRATIVE_TIMEOUT_MS,
+      numPredict: NARRATIVE_NUM_PREDICT,
       think: false,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
@@ -192,4 +270,84 @@ export async function generateNarrative(
 export function shouldRegenerate(current: Debrief, cached: DebriefNarrative | null): boolean {
   if (!cached) return true;
   return cached.inputsHash !== current.inputsHash;
+}
+
+/**
+ * The hosted path, and the primary one.
+ *
+ * `qwen3:4b` had this job first and never did it once in production. Two
+ * independent reasons, both measured rather than assumed:
+ *
+ *   1. It deliberates in UNMARKED prose -- "Hmm, the user wants me to...",
+ *      "Let's structure:" -- so `stripReasoning` cannot remove it (there is
+ *      no `<think>` tag to find) and the deliberation reaches the page as
+ *      if it were the summary. A terse system prompt did not stop it; the
+ *      behaviour is the model's, not the prompt's.
+ *   2. At ~30 tok/s under load it spends its whole token budget
+ *      deliberating and is cut off BEFORE writing the answer.
+ *
+ * gpt-5.4-mini, same prompt, same snapshot: 2.9s, 657 characters, clean
+ * prose, and it correctly wrote "troubles not flagged because none were
+ * recorded" rather than an overclaim. That is the whole job.
+ *
+ * On cost: this is the same credential and model POST /message already
+ * uses. The call is bounded by `shouldRegenerate` -- an unchanged
+ * `inputsHash` regenerates nothing -- so an idle team costs nothing at all,
+ * and a busy one costs one small call per five minutes at most.
+ *
+ * Falls back to the local model when no credential resolves, so an offline
+ * machine degrades to "sometimes a narrative" rather than an error. Both
+ * paths may return null, and a null narrative is a supported state in every
+ * client.
+ */
+export async function generateNarrative(
+  debrief: Debrief,
+  options?: { model?: string; baseUrl?: string },
+): Promise<DebriefNarrative | null> {
+  // An explicit model/baseUrl override means a caller (or a test) is asking
+  // for the local path by name; honour it rather than reaching for a key.
+  if (options?.model || options?.baseUrl) return generateNarrativeLocally(debrief, options);
+
+  let apiKey: string | undefined;
+  try {
+    const credentials = await resolveMessageCredentials();
+    if ("apiKey" in credentials && credentials.apiKey) apiKey = credentials.apiKey;
+  } catch (error) {
+    log.info(`narrative: no hosted credential (${String(error)}); trying the local model`);
+  }
+  if (!apiKey) return generateNarrativeLocally(debrief, options);
+
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: NARRATIVE_HOSTED_MODEL,
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: narrativePrompt(debrief) },
+        ],
+      }),
+      signal: AbortSignal.timeout(NARRATIVE_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      log.warn(`narrative: hosted call failed (${response.status}): ${body.slice(0, 200)}`);
+      return generateNarrativeLocally(debrief, options);
+    }
+    const body = (await response.json()) as { choices?: { message?: { content?: string } }[] };
+    const text = stripReasoning(body?.choices?.[0]?.message?.content ?? "");
+    if (!text) {
+      log.info("narrative skipped: hosted model returned no prose");
+      return null;
+    }
+    if (text.length > NARRATIVE_MAX_CHARS) {
+      log.info(`narrative skipped: ${text.length} chars exceeds ${NARRATIVE_MAX_CHARS}`);
+      return null;
+    }
+    return { text, model: NARRATIVE_HOSTED_MODEL, generatedAt: Date.now(), inputsHash: debrief.inputsHash };
+  } catch (error) {
+    log.warn(`narrative: hosted call errored (${String(error)}); trying the local model`);
+    return generateNarrativeLocally(debrief, options);
+  }
 }

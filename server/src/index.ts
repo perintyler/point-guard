@@ -17,7 +17,7 @@ import { commonDir, pruneOrphanedWorktrees } from "../../src/gitwt.js";
 import { runSupervisorTick } from "../../src/supervisor.js";
 import { runMergeTreeBackstop } from "../../src/merge-tree-backstop.js";
 import { handleMessage } from "../../src/message.js";
-import { generateNarrative, shouldRegenerate } from "../../src/debrief-narrative.js";
+import { generateNarrative, shouldRegenerate, NARRATIVE_INTERVAL_MS } from "../../src/debrief-narrative.js";
 import type { Debrief } from "../../src/debrief.js";
 import { notify } from "../../src/notify.js";
 import { resolveSha } from "../../src/gitwt.js";
@@ -39,7 +39,6 @@ const MERGE_TREE_BACKSTOP_INTERVAL_MS = 300_000;
 // it runs on its own slow cadence and skips entirely when nothing has
 // changed. Five minutes bounds the staleness a client can see; the
 // unchanged-inputs check is what keeps an idle team free.
-const NARRATIVE_INTERVAL_MS = 300_000;
 
 const store = new PointGuardStore();
 const scheduler = new Scheduler({ store });

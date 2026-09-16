@@ -9,9 +9,15 @@ vi.mock("@barry-rocks/agent-runtime", () => ({
   ModelUnavailableError: class ModelUnavailableError extends Error {},
 }));
 
-const { stripReasoning, generateNarrative, NARRATIVE_MAX_CHARS } = await import(
-  "../debrief-narrative.js"
-);
+const {
+  stripReasoning,
+  generateNarrative,
+  generateNarrativeLocally,
+  NARRATIVE_MAX_CHARS,
+  NARRATIVE_KEEP_ALIVE,
+  NARRATIVE_INTERVAL_MS,
+  keepAliveMs,
+} = await import("../debrief-narrative.js");
 
 const DEBRIEF = { inputsHash: "hash-1", counts: {}, sessions: [], plans: [], trouble: [] } as never;
 
@@ -73,10 +79,10 @@ describe("stripReasoning", () => {
   });
 });
 
-describe("generateNarrative output contract", () => {
+describe("generateNarrativeLocally output contract", () => {
   it("stores a short reply", async () => {
     chat.mockResolvedValueOnce({ content: "Six sessions are active. None are flagged." });
-    const result = await generateNarrative(DEBRIEF);
+    const result = await generateNarrativeLocally(DEBRIEF);
     expect(result?.text).toBe("Six sessions are active. None are flagged.");
     expect(result?.inputsHash).toBe("hash-1");
   });
@@ -86,13 +92,13 @@ describe("generateNarrative output contract", () => {
     // characters of markdown tables. Truncating would put a half-table in a
     // prose slot; the debrief is complete without any narrative at all.
     chat.mockResolvedValueOnce({ content: "#".repeat(NARRATIVE_MAX_CHARS + 1) });
-    expect(await generateNarrative(DEBRIEF)).toBeNull();
+    expect(await generateNarrativeLocally(DEBRIEF)).toBeNull();
   });
 
   it("keeps a reply exactly at the limit", async () => {
     const exact = "a".repeat(NARRATIVE_MAX_CHARS);
     chat.mockResolvedValueOnce({ content: exact });
-    expect((await generateNarrative(DEBRIEF))?.text).toBe(exact);
+    expect((await generateNarrativeLocally(DEBRIEF))?.text).toBe(exact);
   });
 
   it("measures the length AFTER stripping reasoning", async () => {
@@ -100,11 +106,86 @@ describe("generateNarrative output contract", () => {
     // that has to fit, not the model's scratch work.
     const reasoning = "<think>" + "z".repeat(NARRATIVE_MAX_CHARS * 2) + "</think>";
     chat.mockResolvedValueOnce({ content: `${reasoning}Two sessions are idle.` });
-    expect((await generateNarrative(DEBRIEF))?.text).toBe("Two sessions are idle.");
+    expect((await generateNarrativeLocally(DEBRIEF))?.text).toBe("Two sessions are idle.");
   });
 
   it("returns null when the model throws", async () => {
     chat.mockRejectedValueOnce(new Error("boom"));
+    expect(await generateNarrativeLocally(DEBRIEF)).toBeNull();
+  });
+});
+
+describe("keep-alive outlives the tick that drives it", () => {
+  /**
+   * The narrative did not generate ONCE in production between shipping and
+   * 2026-09-15 -- `debrief_narrative` held 0 rows and the log held nothing
+   * but timeouts. The cause was not the model, the prompt, or the host:
+   * NARRATIVE_KEEP_ALIVE was "60s" while the tick driving it ran every 300s,
+   * so Ollama evicted the model four minutes before every single call and
+   * each one paid a cold start.
+   *
+   * Measured with the real prompt: cold = 150s (timed out), warm = 69.7s.
+   *
+   * These assert the RELATIONSHIP, not the values, so the two constants can
+   * be retuned freely but never moved back into contradiction.
+   */
+  it("keeps the model resident longer than the gap between calls", () => {
+    expect(keepAliveMs(NARRATIVE_KEEP_ALIVE)).toBeGreaterThan(NARRATIVE_INTERVAL_MS);
+  });
+
+  it("leaves real margin, since the tick is not a precise clock", () => {
+    // Merely EQUAL would race the timer -- eviction and the next call would
+    // land together and the winner would vary.
+    expect(keepAliveMs(NARRATIVE_KEEP_ALIVE)).toBeGreaterThanOrEqual(NARRATIVE_INTERVAL_MS * 1.5);
+  });
+
+  it("parses every keep-alive unit Ollama accepts", () => {
+    expect(keepAliveMs("500ms")).toBe(500);
+    expect(keepAliveMs("60s")).toBe(60_000);
+    expect(keepAliveMs("10m")).toBe(600_000);
+    expect(keepAliveMs("1h")).toBe(3_600_000);
+  });
+
+  it("refuses a spelling it cannot parse rather than guessing a number", () => {
+    // A silent 0 here would make the comparison above pass while meaning
+    // nothing -- the exact shape of failure this suite exists to prevent.
+    expect(() => keepAliveMs("forever")).toThrow(/unparseable/);
+    expect(() => keepAliveMs("")).toThrow(/unparseable/);
+  });
+});
+
+describe("narrative model routing", () => {
+  /**
+   * The local model had this job first and never did it once in production.
+   * It deliberates in UNMARKED prose ("Hmm, the user wants me to..."), so
+   * stripReasoning cannot remove it -- there is no <think> tag to find --
+   * and at ~30 tok/s it is cut off before reaching the answer. The hosted
+   * model does the same job in ~2s.
+   *
+   * So the hosted path is primary. These pin the routing, because a silent
+   * fall back to the local model would look exactly like success until
+   * someone read the narrative and found deliberation in it.
+   */
+  it("uses the local model when a caller names one explicitly", async () => {
+    // An explicit model/baseUrl is a caller asking for local BY NAME -- a
+    // test, or an offline deployment. It must not reach for a credential.
+    chat.mockResolvedValueOnce({ content: "Four sessions are quiet." });
+    const result = await generateNarrative(DEBRIEF, { model: "qwen3:4b" });
+    expect(result?.model).toBe("qwen3:4b");
+    expect(chat).toHaveBeenCalled();
+  });
+
+  it("falls back to the local model when no hosted credential resolves", async () => {
+    // resolveMessageCredentials is unmocked here and finds no key in the
+    // test env, which is the offline case: degrade, never throw.
+    chat.mockResolvedValueOnce({ content: "Two sessions are active." });
+    const result = await generateNarrative(DEBRIEF);
+    expect(result?.text).toBe("Two sessions are active.");
+    expect(result?.model).toBe("qwen3:4b");
+  });
+
+  it("returns null rather than throwing when both paths fail", async () => {
+    chat.mockRejectedValueOnce(new Error("ollama down"));
     expect(await generateNarrative(DEBRIEF)).toBeNull();
   });
 });
