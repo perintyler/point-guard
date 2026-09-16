@@ -28,6 +28,30 @@ export const NARRATIVE_MODEL = "qwen3:4b";
 export const NARRATIVE_KEEP_ALIVE = "60s";
 
 /**
+ * Wall-clock ceiling for one narrative call.
+ *
+ * Measured, not guessed: the real prompt took 54s on an idle machine and
+ * 104s on a busy one, against the client's 120s default. That is close
+ * enough to the edge that a loaded host crosses it and the call dies -- and
+ * the client reports EVERY fetch rejection as "Ollama unreachable", so the
+ * logs blame a server that is running fine. We set our own shorter budget
+ * and say plainly in the log what a timeout actually was.
+ */
+export const NARRATIVE_TIMEOUT_MS = 90_000;
+
+/**
+ * Longest narrative we will store.
+ *
+ * The prompt asks for "two to four plain sentences"; qwen3:4b answered with
+ * 5,681 characters of markdown tables and emoji headings (observed
+ * 2026-09-15, after reasoning was already stripped). A prompt is a request,
+ * not a constraint, so the constraint lives here. Over-long output is
+ * DISCARDED rather than truncated: a narrative cut mid-table is not prose,
+ * and the debrief is complete without it.
+ */
+export const NARRATIVE_MAX_CHARS = 1_200;
+
+/**
  * The overclaim ban is not stylistic. "no textual conflict" versus "safe" is
  * a real distinction this codebase enforces in merge-tree-backstop.ts,
  * because git merge-tree proves the absence of a textual clash and nothing
@@ -91,6 +115,33 @@ export function narrativePrompt(debrief: Debrief): string {
  * outage shows a stale narrative rather than blanking it, and a permanent one
  * shows none rather than blocking the debrief.
  */
+/**
+ * Strip a reasoning model's thinking block.
+ *
+ * We pass `think: false`, but that is a REQUEST, not a guarantee -- qwen3
+ * emitted a full `<think>` monologue through it anyway, and the whole
+ * monologue landed in the stored narrative (seen live, 2026-09-15). Trusting
+ * the flag alone put the model's scratch work on the page.
+ *
+ * So the flag is the ask and this is the check. A leaked block is dropped
+ * rather than shown, and a response that is ONLY a thinking block yields ""
+ * -- which the caller already treats as "no narrative", the same degraded
+ * path as an unreachable model. That is the right outcome: no narrative beats
+ * a narrative made of deliberation.
+ */
+export function stripReasoning(raw: string): string {
+  let text = raw;
+  // Closed blocks anywhere in the response.
+  text = text.replace(/<think>[\s\S]*?<\/think>/gi, "");
+  // An unclosed opener (truncated output) -- everything after it is thinking.
+  text = text.replace(/<think>[\s\S]*$/i, "");
+  // A stray closer with its opener lost upstream: keep only what follows,
+  // since the prose answer always comes after the reasoning.
+  const lastClose = text.toLowerCase().lastIndexOf("</think>");
+  if (lastClose !== -1) text = text.slice(lastClose + "</think>".length);
+  return text.trim();
+}
+
 export async function generateNarrative(
   debrief: Debrief,
   options?: { model?: string; baseUrl?: string },
@@ -101,15 +152,23 @@ export async function generateNarrative(
       baseUrl: options?.baseUrl,
       model,
       keepAlive: NARRATIVE_KEEP_ALIVE,
+      timeoutMs: NARRATIVE_TIMEOUT_MS,
       think: false,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: narrativePrompt(debrief) },
       ],
     });
-    const text = result.content.trim();
+    const text = stripReasoning(result.content);
     if (!text) {
-      log.info("narrative skipped: model returned empty content");
+      log.info("narrative skipped: model returned no prose (empty, or reasoning only)");
+      return null;
+    }
+    // The model ignored "two to four plain sentences" and produced a report.
+    // Drop it: an advisory field is optional, and no narrative is honest
+    // where a wall of markdown in a prose slot is not.
+    if (text.length > NARRATIVE_MAX_CHARS) {
+      log.info(`narrative skipped: ${text.length} chars exceeds ${NARRATIVE_MAX_CHARS}`);
       return null;
     }
     return { text, model, generatedAt: Date.now(), inputsHash: debrief.inputsHash };

@@ -192,9 +192,140 @@ function setupMessageForm() {
   });
 }
 
+/* ---------------- debrief ---------------- */
+
+/**
+ * The counts line. Every number is rendered, including zeros: a zero here is
+ * a measurement ("nothing is stuck"), and hiding it would make "no stuck
+ * sessions" look the same as "we did not check".
+ */
+function renderCounts(counts) {
+  const box = document.getElementById('debrief-counts');
+  box.replaceChildren();
+  const parts = [
+    ['total', counts.total],
+    ['working', counts.working],
+    ['idle', counts.idle],
+    ['stuck', counts.stuck],
+    ['conflicted', counts.conflicted],
+  ];
+  for (const [label, n] of parts) {
+    const chip = el('span', `count count-${label}${n > 0 && (label === 'stuck' || label === 'conflicted') ? ' count-bad' : ''}`);
+    chip.append(el('strong', null, String(n)), el('span', 'count-label', label));
+    box.append(chip);
+  }
+}
+
+/**
+ * The narrative, visually separated and always attributed.
+ *
+ * It is prose ABOUT the numbers, never a number itself, so it carries its
+ * model and age, and says plainly when it is describing an older state
+ * rather than quietly reading as current. A missing narrative renders as
+ * "not generated", never as an empty card a reader would mistake for
+ * "nothing to say".
+ */
+function renderNarrative(debrief) {
+  const box = document.getElementById('debrief-narrative');
+  box.replaceChildren();
+  const n = debrief.narrative;
+  if (!n) {
+    box.append(el('p', 'state', 'No overview generated yet.'));
+    box.hidden = false;
+    return;
+  }
+  box.append(el('p', 'narrative-text', n.text));
+  const stale = n.inputsHash !== debrief.inputsHash;
+  const age = relativeTime(n.generatedAt);
+  const note = stale
+    ? `${n.model} · written ${age} · describes an earlier state`
+    : `${n.model} · written ${age}`;
+  box.append(el('p', `narrative-meta${stale ? ' stale' : ''}`, note));
+  box.hidden = false;
+}
+
+function renderTrouble(trouble) {
+  const box = document.getElementById('debrief-trouble');
+  box.replaceChildren();
+  if (!trouble.length) {
+    // Distinct from a failed read: sources.* carries that, and this line
+    // states what was actually checked rather than implying all is well.
+    box.append(el('p', 'state', 'Nothing flagged.'));
+    box.hidden = false;
+    return;
+  }
+  box.append(el('h2', null, `Trouble (${trouble.length})`));
+  for (const t of trouble) {
+    const row = el('div', 'trouble-row');
+    row.append(el('span', 'trouble-kind', t.kind.replace(/_/g, ' ')));
+    if (t.sessionId) row.append(el('code', 'sid', t.sessionId.slice(0, 12)));
+    row.append(el('span', 'trouble-detail', t.detail));
+    row.append(el('span', 'meta', relativeTime(t.at) ?? ''));
+    box.append(row);
+  }
+  box.hidden = false;
+}
+
+/**
+ * Plan links. The `match` qualifier is rendered, not dropped: "in this repo"
+ * is what a repo match actually proves, and presenting it as ownership would
+ * overstate a link that attaches one plan to every session in the repo.
+ */
+function renderPlans(plans, sources) {
+  const box = document.getElementById('debrief-plans');
+  box.replaceChildren();
+  if (sources && sources.plans && sources.plans.lastError) {
+    box.append(el('p', 'state error', `Could not reach the plans service: ${sources.plans.lastError}`));
+    box.hidden = false;
+    return;
+  }
+  if (!plans.length) {
+    box.append(el('p', 'state', 'No open plans in these repos.'));
+    box.hidden = false;
+    return;
+  }
+  box.append(el('h2', null, 'Plans'));
+  for (const p of plans) {
+    const row = el('div', 'plan-row');
+    const link = el('a', 'plan-title', p.title);
+    link.href = p.url;
+    link.target = '_blank';
+    link.rel = 'noreferrer';
+    row.append(link);
+    row.append(el('span', 'plan-status', p.status));
+    if (p.progress && p.progress.total > 0) {
+      row.append(el('span', 'meta', `${p.progress.done}/${p.progress.total}`));
+    }
+    row.append(el('span', 'plan-match', p.match === 'repo' ? 'in this repo' : 'this session'));
+    box.append(row);
+  }
+  box.hidden = false;
+}
+
+async function loadDebrief() {
+  const counts = document.getElementById('debrief-counts');
+  try {
+    const { debrief } = await api('/api/debrief');
+    renderCounts(debrief.counts);
+    renderNarrative(debrief);
+    renderTrouble(debrief.trouble);
+    renderPlans(debrief.plans, debrief.sources);
+  } catch (err) {
+    // 503 until the first supervisor tick lands, which is a real and
+    // temporary state -- say so rather than rendering an empty dashboard
+    // that looks like a quiet team.
+    showError(counts, err);
+    document.getElementById('debrief-narrative').hidden = true;
+    document.getElementById('debrief-trouble').hidden = true;
+    document.getElementById('debrief-plans').hidden = true;
+  }
+}
+
 /* ---------------- boot ---------------- */
 
 setupMessageForm();
 loadBook();
 loadHistory();
 setInterval(loadBook, BOOK_POLL_MS);
+loadDebrief();
+setInterval(loadDebrief, BOOK_POLL_MS);

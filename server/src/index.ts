@@ -17,6 +17,8 @@ import { commonDir, pruneOrphanedWorktrees } from "../../src/gitwt.js";
 import { runSupervisorTick } from "../../src/supervisor.js";
 import { runMergeTreeBackstop } from "../../src/merge-tree-backstop.js";
 import { handleMessage } from "../../src/message.js";
+import { generateNarrative, shouldRegenerate } from "../../src/debrief-narrative.js";
+import type { Debrief } from "../../src/debrief.js";
 import { notify } from "../../src/notify.js";
 import { resolveSha } from "../../src/gitwt.js";
 
@@ -33,6 +35,11 @@ const SUPERVISOR_TICK_INTERVAL_MS = 60_000;
 // interval keeps it from competing with the main tick for CPU on a
 // machine running several concurrent sessions.
 const MERGE_TREE_BACKSTOP_INTERVAL_MS = 300_000;
+// The narrative is prose about the structured fields, not a measurement, so
+// it runs on its own slow cadence and skips entirely when nothing has
+// changed. Five minutes bounds the staleness a client can see; the
+// unchanged-inputs check is what keeps an idle team free.
+const NARRATIVE_INTERVAL_MS = 300_000;
 
 const store = new PointGuardStore();
 const scheduler = new Scheduler({ store });
@@ -182,6 +189,10 @@ app.get("/readiness", (_req, res) => {
     outboxBacklog: pendingOutbox > 0,
     cursor: store.latestCursor(),
     bookSessions: store.bookRows().length,
+    // Both null-able on purpose: "never generated" is a real state a
+    // diagnosing operator needs to tell from "generated a while ago".
+    debriefGeneratedAt: store.debriefSnapshot()?.generatedAt ?? null,
+    narrativeGeneratedAt: store.debriefNarrative()?.generatedAt ?? null,
   });
 });
 
@@ -366,6 +377,25 @@ app.get("/ledger", (_req, res) => {
  */
 app.get("/book", (_req, res) => {
   res.json({ sessions: store.bookRows() });
+});
+
+/**
+ * The debrief: the whole team's state in one object, for a client to render.
+ * Reads the cache only -- never computes, never calls a model. Four clients
+ * poll; computing here would multiply every poll into Postgres reads, git
+ * calls and model calls.
+ *
+ * 503 when no tick has produced one yet, rather than an empty debrief: "the
+ * service just started" and "there are no sessions" are different states and
+ * a client must be able to tell them apart.
+ */
+app.get("/debrief", (_req, res) => {
+  const snapshot = store.debriefSnapshot();
+  if (!snapshot) {
+    res.status(503).json({ error: "no debrief generated yet" });
+    return;
+  }
+  res.json({ debrief: JSON.parse(snapshot.payloadJson) });
 });
 
 app.post("/questions/:id/answer", (req, res) => {
@@ -595,6 +625,32 @@ async function tickMergeTreeBackstop(): Promise<void> {
   }
 }
 setInterval(() => void tickMergeTreeBackstop(), MERGE_TREE_BACKSTOP_INTERVAL_MS);
+
+/**
+ * The narrative pass. Advisory only: a failure here leaves the previous
+ * narrative in place and never touches the structured snapshot, which is
+ * already durable from the supervisor tick.
+ *
+ * Skips the model call entirely when the inputs hash is unchanged, so an
+ * idle team costs nothing rather than a call every five minutes forever.
+ */
+async function tickNarrative(): Promise<void> {
+  try {
+    const snapshot = store.debriefSnapshot();
+    if (!snapshot) return; // no debrief yet; nothing to describe
+    const debrief = JSON.parse(snapshot.payloadJson) as Debrief;
+    const cached = store.debriefNarrative();
+    if (!shouldRegenerate(debrief, cached ? { ...cached, text: cached.text } : null)) return;
+
+    const narrative = await generateNarrative(debrief);
+    if (!narrative) return; // degraded: keep whatever we had
+    store.putDebriefNarrative(narrative.text, narrative.model, narrative.inputsHash);
+    log.info(`debrief narrative regenerated (${narrative.model})`);
+  } catch (error) {
+    log.warn(`narrative tick failed: ${String(error)}`);
+  }
+}
+setInterval(() => void tickNarrative(), NARRATIVE_INTERVAL_MS);
 
 httpServer.listen(PORT, "127.0.0.1", () => {
   log.info(`point-guard listening on 127.0.0.1:${PORT}`);

@@ -22,6 +22,8 @@ import { getDistinctFilesForSessions } from "@barry-rocks/file-tracker";
 import { createLogger } from "@barry-rocks/logger";
 import { commonDir } from "./gitwt.js";
 import { evaluateStuck } from "./stuck-detection.js";
+import { assembleTrouble, buildDebrief } from "./debrief.js";
+import { fetchOpenPlans, remoteSlugFor } from "./debrief-plans.js";
 import type { PointGuardStore } from "./store.js";
 
 const log = createLogger("point-guard:supervisor");
@@ -68,7 +70,7 @@ async function resolveRepoRoot(workingDirectory: string | null | undefined): Pro
  * wins: it can block OTHER sessions, so it's the more urgent state to
  * surface, even though both are independently true.
  */
-export async function runSupervisorTick(store: PointGuardStore): Promise<{ observed: number; conflicted: number; stuck: number; pruned: number }> {
+export async function runSupervisorTick(store: PointGuardStore): Promise<{ observed: number; conflicted: number; stuck: number; pruned: number; debriefGenerated: boolean }> {
   const sessions = await getActiveSessions();
   const sessionIds = sessions.map((s) => s.id);
 
@@ -170,13 +172,61 @@ export async function runSupervisorTick(store: PointGuardStore): Promise<{ obser
 
   const pruned = store.pruneBookRows(new Set(sessionIds));
 
-  // filesBySession is read but not yet used for a verdict -- the
-  // git-merge-tree backstop (run separately, see merge-tree-backstop.ts)
-  // is what cross-references it against other sessions' files in the same
-  // repo root. Read here now so the supervisor tick's data-gathering shape
-  // doesn't change again when that wiring lands; only the verdict
-  // computation elsewhere will.
-  void filesBySession;
+  // The debrief is a SECOND read-model over this same tick: it reads the
+  // book back rather than recomputing status, so the two can never disagree
+  // about whether a session is stuck. A failure here must not cost the book,
+  // which is already durable by this point.
+  let debriefGenerated = false;
+  try {
+    // One remote lookup per distinct worktree, on the same batching path the
+    // commonDir resolution above already uses.
+    const slugByDir = new Map<string, string | null>();
+    await Promise.all(
+      uniqueDirs.map(async (dir) => {
+        slugByDir.set(dir, await remoteSlugFor(dir));
+      }),
+    );
+    const slugBySession = new Map<string, string | null>();
+    for (const session of sessions) {
+      const dir = session.metadata.working_directory;
+      slugBySession.set(session.id, dir ? (slugByDir.get(dir) ?? null) : null);
+    }
 
-  return { observed: sessions.length, conflicted: conflictedSessions.size, stuck: stuckCount, pruned };
+    const plans = await fetchOpenPlans();
+    const now = Date.now();
+    const cachedNarrative = store.debriefNarrative();
+
+    const debrief = buildDebrief({
+      sessions,
+      book: store.bookRows(),
+      filesBySession,
+      slugBySession,
+      plans,
+      trouble: assembleTrouble({
+        book: store.bookRows(),
+        events: store.recentEvents(50),
+        delegations: [
+          ...store.listDelegations({ state: "blocked" }),
+          ...store.listDelegations({ state: "failed" }),
+        ].map((d) => ({ id: d.id, state: d.state, reason: d.reason, updatedAt: d.updated_at })),
+        outbox: store.failingOutbox(),
+      }),
+      narrative: cachedNarrative
+        ? {
+            text: cachedNarrative.text,
+            model: cachedNarrative.model,
+            generatedAt: cachedNarrative.generatedAt,
+            inputsHash: cachedNarrative.inputsHash,
+          }
+        : null,
+      now,
+    });
+
+    store.putDebriefSnapshot(JSON.stringify(debrief), debrief.inputsHash);
+    debriefGenerated = true;
+  } catch (error) {
+    log.warn(`debrief skipped this tick: ${String(error)}`);
+  }
+
+  return { observed: sessions.length, conflicted: conflictedSessions.size, stuck: stuckCount, pruned, debriefGenerated };
 }

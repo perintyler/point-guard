@@ -30,6 +30,19 @@ vi.mock("@barry-rocks/db", () => ({
     for (const id of ids) if (h.toolCallsBySession.has(id)) m.set(id, h.toolCallsBySession.get(id));
     return m;
   }),
+  // Used by buildDebrief. Mirrors the real precedence rather than returning a
+  // constant, so a test asserting on a session's displayed name is testing
+  // the same fallback chain production uses.
+  getName: (session: { id: string; system_prompt?: string | null; metadata: Record<string, unknown> }) =>
+    (session.metadata?.name as string) || session.system_prompt?.slice(0, 50) || session.id.slice(0, 8),
+}));
+
+// The debrief reaches the plans service over HTTP. Stubbed to "answered, and
+// had none" so the tick's debrief half runs to completion in tests; the
+// could-not-ask path has its own coverage in debrief.test.ts.
+vi.mock("../debrief-plans.js", () => ({
+  fetchOpenPlans: vi.fn(async () => ({ plans: [], error: null, baseUrl: "http://plans.test" })),
+  remoteSlugFor: vi.fn(async () => null),
 }));
 
 vi.mock("@barry-rocks/locks-bag/db", () => ({
@@ -92,7 +105,7 @@ describe("runSupervisorTick", () => {
     const store = new PointGuardStore();
     const result = await runSupervisorTick(store);
 
-    expect(result).toEqual({ observed: 1, conflicted: 0, stuck: 0, pruned: 0 });
+    expect(result).toEqual({ observed: 1, conflicted: 0, stuck: 0, pruned: 0, debriefGenerated: true });
     const rows = store.bookRows();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({

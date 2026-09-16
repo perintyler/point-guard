@@ -154,6 +154,15 @@ export const server = createServer(async (req, res) => {
         return json(res, body, status);
       }
 
+      // The upstream status is passed through deliberately: /debrief answers
+      // 503 until the first tick has produced one, and a browser that showed
+      // "no sessions" for "the supervisor has not started yet" would be
+      // exactly the collapse this proxy exists to avoid.
+      if (url.pathname === "/api/debrief" && method === "GET") {
+        const { status, body } = await callApi("/debrief");
+        return json(res, body, status);
+      }
+
       if (url.pathname === "/api/message" && method === "POST") {
         const body = await readBody(req);
         const { status, body: upstreamBody } = await callApi("/message", { method: "POST", body });
