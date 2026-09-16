@@ -258,3 +258,209 @@ export function hashDebriefInputs(input: {
   };
   return createHash("sha256").update(JSON.stringify(stable)).digest("hex").slice(0, 16);
 }
+
+/**
+ * Trouble, assembled from the four signals that exist today.
+ *
+ * Deduped by (kind, sessionId) with the BOOK winning: the book is this
+ * tick's live verdict, while a stream_events row may describe a state that
+ * has since cleared. Showing both would double-count one problem.
+ *
+ * The outbox collapses to ONE entry however many rows are failing: a
+ * projection outage is one problem, and twelve identical rows would drown
+ * the session troubles that actually differ from each other.
+ */
+export function assembleTrouble(input: {
+  book: Array<{ sessionId: string; status: string; flaggedReason: string | null; updatedAt: number }>;
+  events: Array<{ type: string; payload: unknown; createdAt: number }>;
+  delegations: Array<{ id: string; state: string; reason: string | null; updatedAt: number }>;
+  outbox: Array<{ attempts: number; lastError: string | null; createdAt: number }>;
+}): DebriefTrouble[] {
+  const out: DebriefTrouble[] = [];
+  const seen = new Set<string>();
+
+  const push = (t: DebriefTrouble) => {
+    const key = `${t.kind}:${t.sessionId ?? "-"}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(t);
+  };
+
+  for (const row of input.book) {
+    if (row.status === "ok") continue;
+    const kind = row.status === "stuck" ? "session_stuck" : "conflict_detected";
+    push({
+      id: `${kind}:${row.sessionId}:${row.updatedAt}`,
+      kind,
+      sessionId: row.sessionId,
+      // flaggedReason is non-null whenever status is not ok, but a row that
+      // somehow lacks one should say so rather than render as an empty line.
+      detail: row.flaggedReason ?? "(flagged with no reason recorded)",
+      at: row.updatedAt,
+    });
+  }
+
+  for (const event of input.events) {
+    if (event.type !== "session_stuck" && event.type !== "conflict_detected") continue;
+    const payload = (event.payload ?? {}) as { sessionId?: string; reason?: string };
+    if (!payload.sessionId) continue;
+    push({
+      id: `${event.type}:${payload.sessionId}:${event.createdAt}`,
+      kind: event.type,
+      sessionId: payload.sessionId,
+      detail: payload.reason ?? "(no reason recorded)",
+      at: event.createdAt,
+    });
+  }
+
+  for (const d of input.delegations) {
+    if (d.state !== "blocked" && d.state !== "failed") continue;
+    const kind = d.state === "blocked" ? "delegation_blocked" : "delegation_failed";
+    // sessionId is null on purpose: a delegation is point-guard's OWN work,
+    // not one of the watched sessions, and attaching it to a session row
+    // would put point-guard's internals in someone else's line.
+    out.push({
+      id: `${kind}:${d.id}:${d.updatedAt}`,
+      kind,
+      sessionId: null,
+      detail: d.reason ?? `delegation ${d.id} is ${d.state}`,
+      at: d.updatedAt,
+    });
+  }
+
+  if (input.outbox.length > 0) {
+    const newest = input.outbox.reduce((a, b) => (b.createdAt > a.createdAt ? b : a));
+    out.push({
+      id: `outbox_undelivered:-:${newest.createdAt}`,
+      kind: "outbox_undelivered",
+      sessionId: null,
+      detail: `${input.outbox.length} undelivered event(s); newest error: ${newest.lastError ?? "none recorded"}`,
+      at: newest.createdAt,
+    });
+  }
+
+  return out.sort((a, b) => b.at - a.at).slice(0, TROUBLE_CAP);
+}
+
+export interface BuildDebriefDeps {
+  /** Active session rows, already fetched by the tick. */
+  sessions: SessionRecord[];
+  /** The book, read verbatim -- the debrief never re-derives status. */
+  book: ReturnType<PointGuardStore["bookRows"]>;
+  /** Distinct files touched, per session, from file-tracker. */
+  filesBySession: Map<string, string[]>;
+  /** Remote slug per session id, for plan matching. Absent = no remote. */
+  slugBySession: Map<string, string | null>;
+  /** Plans the service returned, plus whether we could ask at all. */
+  plans: { plans: Array<{ id: string; title: string; status: string; repo: string | null; updated_at: string; progress?: { done: number; total: number; of: string } }>; error: string | null; baseUrl: string };
+  trouble: DebriefTrouble[];
+  /** Carried forward so a narrative survives a structural recompute. */
+  narrative: DebriefNarrative | null;
+  now: number;
+}
+
+/**
+ * Assemble the debrief. Pure: every input is passed in, so this is testable
+ * without Postgres, git, the plans service or a model.
+ *
+ * Session status comes from the BOOK, not from re-reading the session rows --
+ * if these two ever disagreed about whether something is stuck, there would
+ * be no way to tell which was right.
+ */
+export function buildDebrief(deps: BuildDebriefDeps): Debrief {
+  const { sessions, book, filesBySession, slugBySession, plans, trouble, narrative, now } = deps;
+
+  const bookById = new Map(book.map((b) => [b.sessionId, b]));
+  const sessionById = new Map(sessions.map((s) => [s.id, s]));
+
+  const rows: DebriefSession[] = [];
+  const allPlans = new Map<string, DebriefPlanLink>();
+
+  for (const b of book) {
+    const record = sessionById.get(b.sessionId);
+    const createdAt = record ? Date.parse(record.created_at) : b.updatedAt;
+    const slug = slugBySession.get(b.sessionId) ?? null;
+    const links = linkPlansForSlug(plans, slug, now);
+    for (const link of links) allPlans.set(link.id, link);
+
+    rows.push({
+      sessionId: b.sessionId,
+      name: record ? getName(record) : b.sessionId.slice(0, 8),
+      nameSource: record ? nameSourceOf(record) : "idStub",
+      repo: b.repo,
+      repoName: repoDisplayName(b.repo),
+      branch: b.branch,
+      worktree: b.worktree,
+      lifecycleStatus: record?.status ?? "unknown",
+      status: b.status,
+      flaggedReason: b.flaggedReason,
+      createdAt: Number.isFinite(createdAt) ? createdAt : b.updatedAt,
+      lastActivityAt: b.lastActivityAt,
+      aliveMs: Math.max(0, now - (Number.isFinite(createdAt) ? createdAt : b.updatedAt)),
+      idleMs: b.lastActivityAt === null ? null : Math.max(0, now - b.lastActivityAt),
+      latestSummary: latestSummaryEntry(record?.summary),
+      filesTouched: filesBySession.get(b.sessionId)?.length ?? 0,
+      mergeTreeCheckedAt: b.mergeTreeCheckedAt,
+      plans: links,
+    });
+  }
+
+  const counts = countSessions(rows, now);
+  const planList = [...allPlans.values()];
+  const inputsHash = hashDebriefInputs({ counts, sessions: rows, plans: planList, trouble });
+
+  return {
+    generatedAt: now,
+    counts,
+    sessions: rows,
+    plans: planList,
+    trouble,
+    narrative,
+    inputsHash,
+    sources: {
+      // The sessions read got us here at all -- reaching this function means
+      // it succeeded this tick.
+      sessions: { lastSucceededAt: now, lastError: null },
+      plans: {
+        lastSucceededAt: plans.error === null ? now : null,
+        lastError: plans.error,
+      },
+    },
+  };
+}
+
+/**
+ * Plans naming the same repo as a session, as links.
+ *
+ * `match: "repo"` is the whole honesty of this function: it means "this plan
+ * names the repo this session is in", NOT "this session is working on it".
+ * Sixteen sessions share one repo here, so a repo-scoped plan attaches to all
+ * sixteen, and clients must render the qualifier. Never widen this to fuzzy
+ * slug matching -- a wrong link is worse than no link, and the real fix is a
+ * genuine session_id on the plan.
+ *
+ * Lives here rather than in debrief-plans.ts because buildDebrief needs it
+ * and that module already imports this one; a second copy over there would
+ * drift from this one silently.
+ */
+export function linkPlansForSlug(
+  fetched: { plans: Array<{ id: string; title: string; status: string; repo: string | null; updated_at: string; progress?: { done: number; total: number; of: string } }>; baseUrl: string },
+  slug: string | null,
+  now: number,
+): DebriefPlanLink[] {
+  if (!slug) return [];
+  return fetched.plans
+    .filter((p) => p.repo === slug)
+    .filter((p) => {
+      const updated = Date.parse(p.updated_at);
+      return Number.isFinite(updated) && now - updated <= PLAN_STALENESS_MS;
+    })
+    .map((p) => ({
+      id: p.id,
+      title: p.title,
+      status: p.status,
+      progress: p.progress ?? { done: 0, total: 0, of: "body" },
+      url: `${fetched.baseUrl}/#${p.id}`,
+      match: "repo" as const,
+    }));
+}

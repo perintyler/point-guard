@@ -260,6 +260,35 @@ CREATE TABLE IF NOT EXISTS messages_log (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_log_created ON messages_log(created_at);
+
+-- The debrief's cached snapshot: one row, rewritten each supervisor tick.
+-- Cached for the same reason GET /book reads its cache rather than computing:
+-- clients poll on timers, so a per-request recompute would multiply every
+-- poll into Postgres reads and git calls.
+--
+-- Deliberately NOT guarded by a SCHEMA_VERSION bump. Both debrief tables are
+-- pure caches -- delete either and the next tick rebuilds it -- so an older
+-- build that does not know them simply ignores them, while a version bump
+-- would make the RUNNING service throw on restart against a db it wrote
+-- itself. Additive cache tables do not earn that.
+CREATE TABLE IF NOT EXISTS debrief_snapshot (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  payload_json TEXT NOT NULL,
+  inputs_hash TEXT NOT NULL,
+  generated_at INTEGER NOT NULL
+);
+
+-- The narrative lives in its own row on its own slower cadence, so a
+-- narrative one tick stale survives a structural recompute instead of being
+-- clobbered to NULL every 60s. Same separation, same reasoning, as
+-- book.merge_tree_checked_at versus the main tick's upsert.
+CREATE TABLE IF NOT EXISTS debrief_narrative (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  text TEXT NOT NULL,
+  model TEXT NOT NULL,
+  inputs_hash TEXT NOT NULL,
+  generated_at INTEGER NOT NULL
+);
 `;
 
 export interface DelegationRow {
@@ -1180,5 +1209,79 @@ export class PointGuardStore {
       .prepare("SELECT id, message, reply, created_at FROM messages_log ORDER BY created_at DESC LIMIT ?")
       .all(limit) as Array<{ id: string; message: string; reply: string; created_at: number }>;
     return rows.map((r) => ({ id: r.id, message: r.message, reply: r.reply, createdAt: r.created_at }));
+  }
+
+  /**
+   * Undelivered outbox rows that have actually been TRIED (attempts > 0),
+   * with the error. A row at attempts 0 is merely queued, not failing, and
+   * reporting it as trouble would cry wolf on every normal enqueue.
+   *
+   * Separate from pendingOutbox rather than widening it: that shape is
+   * consumed by /readiness, and changing a method's return type to suit a
+   * new caller is how unrelated callers break.
+   */
+  failingOutbox(limit = 50): Array<{ id: string; attempts: number; lastError: string | null; createdAt: number }> {
+    const rows = this.db
+      .prepare(
+        `SELECT id, attempts, last_error, created_at FROM outbox
+         WHERE delivered_at IS NULL AND attempts > 0
+         ORDER BY created_at DESC LIMIT ?`,
+      )
+      .all(limit) as Array<{ id: string; attempts: number; last_error: string | null; created_at: number }>;
+    return rows.map((r) => ({ id: r.id, attempts: r.attempts, lastError: r.last_error, createdAt: r.created_at }));
+  }
+
+  // ------------------------------------------------------------- debrief
+
+  /** Replace the cached debrief. One row, rewritten every tick. */
+  putDebriefSnapshot(payloadJson: string, inputsHash: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO debrief_snapshot (id, payload_json, inputs_hash, generated_at)
+         VALUES (1, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           payload_json = excluded.payload_json,
+           inputs_hash = excluded.inputs_hash,
+           generated_at = excluded.generated_at`,
+      )
+      .run(payloadJson, inputsHash, this.now());
+  }
+
+  /** null = no tick has produced a debrief yet (fresh db, or the service has
+   *  not completed a tick since boot). Distinct from a debrief that ran and
+   *  found no sessions, which is a real payload with empty arrays. */
+  debriefSnapshot(): { payloadJson: string; inputsHash: string; generatedAt: number } | null {
+    const row = this.db
+      .prepare("SELECT payload_json, inputs_hash, generated_at FROM debrief_snapshot WHERE id = 1")
+      .get() as { payload_json: string; inputs_hash: string; generated_at: number } | undefined;
+    return row
+      ? { payloadJson: row.payload_json, inputsHash: row.inputs_hash, generatedAt: row.generated_at }
+      : null;
+  }
+
+  putDebriefNarrative(text: string, model: string, inputsHash: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO debrief_narrative (id, text, model, inputs_hash, generated_at)
+         VALUES (1, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           text = excluded.text,
+           model = excluded.model,
+           inputs_hash = excluded.inputs_hash,
+           generated_at = excluded.generated_at`,
+      )
+      .run(text, model, inputsHash, this.now());
+  }
+
+  /** null = NO narrative has ever been generated (first boot, or every
+   *  attempt has failed). Never a placeholder: the caller must be able to
+   *  tell that from a narrative that exists and says little. */
+  debriefNarrative(): { text: string; model: string; inputsHash: string; generatedAt: number } | null {
+    const row = this.db
+      .prepare("SELECT text, model, inputs_hash, generated_at FROM debrief_narrative WHERE id = 1")
+      .get() as { text: string; model: string; inputs_hash: string; generated_at: number } | undefined;
+    return row
+      ? { text: row.text, model: row.model, inputsHash: row.inputs_hash, generatedAt: row.generated_at }
+      : null;
   }
 }

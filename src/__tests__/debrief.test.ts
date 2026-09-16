@@ -12,6 +12,8 @@ import {
   hashDebriefInputs,
   latestSummaryEntry,
   repoDisplayName,
+  assembleTrouble,
+  TROUBLE_CAP,
   type DebriefSession,
 } from "../debrief.js";
 
@@ -172,5 +174,93 @@ describe("hashDebriefInputs", () => {
       sessions: [session({ lastActivityAt: NOW + 30_000, idleMs: 0, aliveMs: 90_000 })],
     };
     expect(hashDebriefInputs(later)).toBe(hashDebriefInputs(base));
+  });
+});
+
+describe("assembleTrouble", () => {
+  const book = (over: Record<string, unknown> = {}) => ({
+    sessionId: "s1",
+    status: "ok",
+    flaggedReason: null as string | null,
+    updatedAt: NOW,
+    ...over,
+  });
+
+  it("turns a flagged book row into a trouble carrying its real reason", () => {
+    const out = assembleTrouble({
+      book: [book({ status: "stuck", flaggedReason: "repeated 3x with the same outcome: Bash" })],
+      events: [],
+      delegations: [],
+      outbox: [],
+    });
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ kind: "session_stuck", sessionId: "s1" });
+    expect(out[0].detail).toContain("repeated 3x");
+  });
+
+  it("reports nothing for an all-ok book", () => {
+    expect(assembleTrouble({ book: [book()], events: [], delegations: [], outbox: [] })).toHaveLength(0);
+  });
+
+  it("does not double-count a session flagged in BOTH the book and an event", () => {
+    // The book is this tick's live verdict; the event may describe a state
+    // that has since cleared. Two entries for one problem would overstate
+    // how much is wrong.
+    const out = assembleTrouble({
+      book: [book({ status: "stuck", flaggedReason: "from the book" })],
+      events: [{ type: "session_stuck", payload: { sessionId: "s1", reason: "from the event" }, createdAt: NOW - 5000 }],
+      delegations: [],
+      outbox: [],
+    });
+    expect(out).toHaveLength(1);
+    expect(out[0].detail).toBe("from the book");
+  });
+
+  it("keeps an event-only trouble for a session the book no longer flags", () => {
+    const out = assembleTrouble({
+      book: [book({ sessionId: "other" })],
+      events: [{ type: "session_stuck", payload: { sessionId: "s1", reason: "cleared since" }, createdAt: NOW }],
+      delegations: [],
+      outbox: [],
+    });
+    expect(out).toHaveLength(1);
+    expect(out[0].sessionId).toBe("s1");
+  });
+
+  it("collapses many failing outbox rows into ONE entry, not N", () => {
+    // A projection outage is one problem. Twelve identical rows would drown
+    // the session troubles that actually differ from each other.
+    const rows = Array.from({ length: 12 }, (_, i) => ({
+      attempts: 3,
+      lastError: `api 500 (${i})`,
+      createdAt: NOW - i * 1000,
+    }));
+    const out = assembleTrouble({ book: [], events: [], delegations: [], outbox: rows });
+    expect(out).toHaveLength(1);
+    expect(out[0].kind).toBe("outbox_undelivered");
+    expect(out[0].detail).toContain("12 undelivered");
+  });
+
+  it("attaches delegation trouble to no session, since a delegation is point-guard's own work", () => {
+    const out = assembleTrouble({
+      book: [],
+      events: [],
+      delegations: [{ id: "dg_1", state: "blocked", reason: "attempt cap reached", updatedAt: NOW }],
+      outbox: [],
+    });
+    expect(out[0]).toMatchObject({ kind: "delegation_blocked", sessionId: null });
+    expect(out[0].detail).toBe("attempt cap reached");
+  });
+
+  it("sorts newest first and caps the list", () => {
+    const many = Array.from({ length: TROUBLE_CAP + 10 }, (_, i) => ({
+      id: `dg_${i}`,
+      state: "failed",
+      reason: `failure ${i}`,
+      updatedAt: NOW - i * 1000,
+    }));
+    const out = assembleTrouble({ book: [], events: [], delegations: many, outbox: [] });
+    expect(out).toHaveLength(TROUBLE_CAP);
+    expect(out[0].at).toBeGreaterThan(out[out.length - 1].at);
   });
 });

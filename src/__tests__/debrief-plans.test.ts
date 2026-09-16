@@ -53,7 +53,7 @@ describe("normalizeRemote agrees with the plans bag's own", () => {
 
 describe("linkPlansForSlug", () => {
   it("links a plan naming the same repo", () => {
-    const links = linkPlansForSlug([plan()], "github.com/perintyler/barry-dev", "http://x", NOW);
+    const links = linkPlansForSlug({ plans: [plan()], baseUrl: "http://x" }, "github.com/perintyler/barry-dev", NOW);
     expect(links).toHaveLength(1);
     expect(links[0]).toMatchObject({ id: "plan_abc", title: "A plan" });
   });
@@ -61,34 +61,34 @@ describe("linkPlansForSlug", () => {
   it("labels every link match:'repo', never 'session'", () => {
     // Guards the honesty rule against a well-meaning future "improvement":
     // a repo match must never be presented as this session owning the plan.
-    const links = linkPlansForSlug([plan()], "github.com/perintyler/barry-dev", "http://x", NOW);
+    const links = linkPlansForSlug({ plans: [plan()], baseUrl: "http://x" }, "github.com/perintyler/barry-dev", NOW);
     expect(links.every((l) => l.match === "repo")).toBe(true);
   });
 
   it("attaches the same plan to every session in that repo -- and that is why match matters", () => {
     const slug = "github.com/perintyler/barry-dev";
-    const a = linkPlansForSlug([plan()], slug, "http://x", NOW);
-    const b = linkPlansForSlug([plan()], slug, "http://x", NOW);
+    const a = linkPlansForSlug({ plans: [plan()], baseUrl: "http://x" }, slug, NOW);
+    const b = linkPlansForSlug({ plans: [plan()], baseUrl: "http://x" }, slug, NOW);
     expect(a[0].id).toBe(b[0].id);
     expect(a[0].match).toBe("repo");
   });
 
   it("does not link a plan from a different repo", () => {
-    const links = linkPlansForSlug([plan()], "github.com/perintyler/something-else", "http://x", NOW);
+    const links = linkPlansForSlug({ plans: [plan()], baseUrl: "http://x" }, "github.com/perintyler/something-else", NOW);
     expect(links).toHaveLength(0);
   });
 
   it("links nothing when the session has no remote slug", () => {
-    expect(linkPlansForSlug([plan()], null, "http://x", NOW)).toHaveLength(0);
+    expect(linkPlansForSlug({ plans: [plan()], baseUrl: "http://x" }, null, NOW)).toHaveLength(0);
   });
 
   it("drops a plan untouched for longer than the staleness window", () => {
     const stale = plan({ updated_at: iso(NOW - PLAN_STALENESS_MS - 1) });
-    expect(linkPlansForSlug([stale], "github.com/perintyler/barry-dev", "http://x", NOW)).toHaveLength(0);
+    expect(linkPlansForSlug({ plans: [stale], baseUrl: "http://x" }, "github.com/perintyler/barry-dev", NOW)).toHaveLength(0);
   });
 
   it("drops a plan whose updated_at is unparseable rather than treating it as fresh", () => {
     const bad = plan({ updated_at: "not a date" });
-    expect(linkPlansForSlug([bad], "github.com/perintyler/barry-dev", "http://x", NOW)).toHaveLength(0);
+    expect(linkPlansForSlug({ plans: [bad], baseUrl: "http://x" }, "github.com/perintyler/barry-dev", NOW)).toHaveLength(0);
   });
 });

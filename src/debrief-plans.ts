@@ -12,7 +12,6 @@
  */
 import { createLogger } from "@barry-rocks/logger";
 import { git } from "./gitwt.js";
-import { PLAN_STALENESS_MS, type DebriefPlanLink } from "./debrief.js";
 
 const log = createLogger("point-guard:debrief-plans");
 
@@ -90,33 +89,9 @@ export async function fetchOpenPlans(baseUrl = process.env.BARRY_PLANS_URL ?? PL
 }
 
 /**
- * Plans naming the same repo as this session, as links.
- *
- * `match: "repo"` is the whole honesty of this function. It means "this plan
- * names the repo this session is in" and NOT "this session is working on it":
- * sixteen sessions share one repo here, so a repo-scoped plan attaches to all
- * sixteen. Never widen this to fuzzy slug matching -- a wrong link is worse
- * than no link, and the real fix is a genuine session_id on the plan.
+ * Re-exported so callers of this module get the matcher alongside the fetch.
+ * The implementation lives in debrief.ts because buildDebrief needs it there
+ * and this module already imports that one -- keeping a second copy here
+ * would let the two drift apart without anything failing.
  */
-export function linkPlansForSlug(
-  plans: PlansApiPlan[],
-  slug: string | null,
-  baseUrl: string,
-  now: number,
-): DebriefPlanLink[] {
-  if (!slug) return [];
-  return plans
-    .filter((p) => p.repo === slug)
-    .filter((p) => {
-      const updated = Date.parse(p.updated_at);
-      return Number.isFinite(updated) && now - updated <= PLAN_STALENESS_MS;
-    })
-    .map((p) => ({
-      id: p.id,
-      title: p.title,
-      status: p.status,
-      progress: p.progress ?? { done: 0, total: 0, of: "body" },
-      url: `${baseUrl}/#${p.id}`,
-      match: "repo" as const,
-    }));
-}
+export { linkPlansForSlug } from "./debrief.js";
