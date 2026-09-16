@@ -85,7 +85,8 @@ async fn run(
             let t = tx.clone();
             tokio::spawn(async move {
                 s.fetch_delegations(t.clone()).await;
-                s.fetch_message_history(t).await;
+                s.fetch_message_history(t.clone()).await;
+                s.fetch_debrief(t).await;
             });
         }
 

@@ -44,10 +44,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .split(outer[0]);
 
     draw_board(frame, app, main[0]);
-    if app.pane == Pane::Evidence {
-        draw_evidence(frame, app, main[1]);
-    } else {
-        draw_chat(frame, app, main[1]);
+    // A `match`, not an if/else chain: adding a Pane variant without a render
+    // arm used to fall silently through to the chat pane, so a new pane would
+    // compile and then draw the wrong thing. This makes the compiler catch it.
+    match app.pane {
+        Pane::Evidence => draw_evidence(frame, app, main[1]),
+        Pane::Debrief => draw_debrief(frame, app, main[1]),
+        Pane::Board | Pane::Chat => draw_chat(frame, app, main[1]),
     }
     draw_input(frame, app, outer[1]);
     draw_status(frame, app, outer[2]);
@@ -167,4 +170,182 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled(format!(" | {error}"), Style::default().fg(color(&app.config.theme.warn))));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// The debrief pane: counts, the prose overview, trouble, and plans.
+///
+/// Absence is stated, never left blank. An empty region reads as "nothing to
+/// report"; the states here mean "nothing was written", "nothing has run
+/// yet", or "we could not ask", which are different facts.
+fn draw_debrief(frame: &mut Frame, app: &App, area: Rect) {
+    let focused = app.pane == Pane::Debrief;
+    let border = if focused {
+        Style::default().fg(color(&app.config.theme.accent))
+    } else {
+        Style::default()
+    };
+    let dim = Style::default().add_modifier(Modifier::DIM);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    let Some(debrief) = app.debrief.as_ref() else {
+        let reason = app
+            .debrief_error
+            .clone()
+            .unwrap_or_else(|| "waiting for the first supervisor tick".into());
+        lines.push(Line::from(Span::styled(format!("no debrief yet — {reason}"), dim)));
+        frame.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: true })
+                .block(Block::default().borders(Borders::ALL).title(" debrief ").border_style(border)),
+            area,
+        );
+        return;
+    };
+
+    // Counts. Zeroes are rendered, never hidden: someone checking whether
+    // anything is stuck needs to see "0 stuck", and a missing figure answers
+    // nothing while looking the same as a zero.
+    let c = &debrief.counts;
+    lines.push(Line::from(vec![
+        Span::raw(format!("{} sessions  ", c.total)),
+        Span::styled(format!("{} working  ", c.working), Style::default().fg(color(&app.config.theme.ok))),
+        Span::styled(format!("{} idle  ", c.idle), dim),
+        Span::styled(
+            format!("{} stuck  ", c.stuck),
+            if c.stuck > 0 { Style::default().fg(color(&app.config.theme.warn)) } else { dim },
+        ),
+        Span::styled(
+            format!("{} conflicted", c.conflicted),
+            if c.conflicted > 0 { Style::default().fg(color(&app.config.theme.err)) } else { dim },
+        ),
+    ]));
+    lines.push(Line::from(""));
+
+    // The narrative, always attributed and always marked when stale, so it
+    // cannot be mistaken for a measurement.
+    match debrief.narrative.as_ref() {
+        None => lines.push(Line::from(Span::styled("no overview generated yet", dim))),
+        Some(narrative) => {
+            let stale = narrative.inputs_hash != debrief.inputs_hash;
+            for chunk in narrative.text.lines() {
+                lines.push(Line::from(Span::styled(chunk.to_string(), dim)));
+            }
+            let meta = if stale {
+                format!("— {} · describes an earlier state", narrative.model)
+            } else {
+                format!("— {}", narrative.model)
+            };
+            lines.push(Line::from(Span::styled(
+                meta,
+                if stale { Style::default().fg(color(&app.config.theme.warn)) } else { dim },
+            )));
+        }
+    }
+    lines.push(Line::from(""));
+
+    // Trouble. "nothing flagged", never "all clear": the supervisor reports
+    // what it detected and cannot observe that a session is healthy.
+    lines.push(Line::from(Span::raw(format!("trouble ({})", debrief.trouble.len()))));
+    if debrief.trouble.is_empty() {
+        lines.push(Line::from(Span::styled("  nothing flagged", dim)));
+    } else {
+        for trouble in debrief.trouble.iter().take(10) {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {} ", trouble.kind.replace('_', " ")), Style::default().fg(color(&app.config.theme.warn))),
+                Span::styled(trouble.detail.chars().take(60).collect::<String>(), dim),
+            ]));
+        }
+    }
+    lines.push(Line::from(""));
+
+    // Plans. An empty list means different things depending on whether the
+    // plans service answered, so the two are never rendered the same way.
+    lines.push(Line::from(Span::raw(format!("plans ({})", debrief.plans.len()))));
+    if let Some(error) = debrief.sources.plans.last_error.as_ref() {
+        lines.push(Line::from(Span::styled(
+            format!("  could not reach the plans service — {error}"),
+            Style::default().fg(color(&app.config.theme.warn)),
+        )));
+    } else if debrief.plans.is_empty() {
+        lines.push(Line::from(Span::styled("  no open plans", dim)));
+    }
+    for plan in debrief.plans.iter().take(10) {
+        lines.push(Line::from(vec![
+            Span::raw(format!("  {} ", plan.title.chars().take(44).collect::<String>())),
+            Span::styled(format!("{}/{} ", plan.progress.done, plan.progress.total), dim),
+            // The qualifier, never ownership: a repo match ties this plan to
+            // every session in the repo, not to one of them.
+            Span::styled(
+                if plan.match_kind == "repo" { "in this repo".to_string() } else { plan.match_kind.clone() },
+                dim,
+            ),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+
+    // Per-session rows. The merge-tree line is rendered for EVERY session,
+    // including those never checked -- hiding it for those would make a
+    // never-checked session look like a checked-and-clean one.
+    lines.push(Line::from(Span::raw(format!("sessions ({})", debrief.sessions.len()))));
+    for session in debrief.sessions.iter().take(12) {
+        let status_style = match session.status.as_str() {
+            "stuck" => Style::default().fg(color(&app.config.theme.warn)),
+            "conflicted" => Style::default().fg(color(&app.config.theme.err)),
+            _ => Style::default().fg(color(&app.config.theme.ok)),
+        };
+        let where_at = session.repo_name.clone().unwrap_or_else(|| "no repo".into());
+        let idle = match session.idle_ms {
+            // None means the session has produced NO messages at all --
+            // different from "idle for 0ms", which would read as active.
+            None => "no activity".to_string(),
+            Some(ms) => format!("{}m idle", ms / 60_000),
+        };
+        lines.push(Line::from(vec![
+            Span::styled("  ● ", status_style),
+            Span::raw(format!("{} ", session.name.chars().take(24).collect::<String>())),
+            Span::styled(
+                format!("{} ", session.session_id.chars().take(8).collect::<String>()),
+                dim,
+            ),
+            Span::styled(format!("({where_at}) {idle}"), dim),
+        ]));
+        if let Some(reason) = session.flagged_reason.as_ref() {
+            lines.push(Line::from(Span::styled(
+                format!("      {}", reason.chars().take(60).collect::<String>()),
+                status_style,
+            )));
+        }
+        lines.push(Line::from(Span::styled(
+            match session.merge_tree_checked_at {
+                None => "      merge-tree: not yet checked".to_string(),
+                Some(_) => "      merge-tree: checked, no textual conflict".to_string(),
+            },
+            dim,
+        )));
+    }
+
+    // The debrief is a cached read-model, not a live query, so its age is
+    // part of reading it honestly -- a stale snapshot looks identical to a
+    // fresh one without this.
+    let age_secs = (now_millis() - debrief.generated_at).max(0) / 1000;
+    let title = format!(" debrief ({} sessions, {}s ago) ", debrief.counts.total, age_secs);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .scroll((app.debrief_scroll, 0))
+            .block(Block::default().borders(Borders::ALL).title(title).border_style(border)),
+        area,
+    );
+}
+
+/// Wall-clock now in unix ms. Only used for showing how old the cached
+/// debrief snapshot is.
+fn now_millis() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }

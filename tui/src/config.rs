@@ -23,6 +23,9 @@ pub struct Keys {
     pub cancel_delegation: char,
     pub scroll_up: char,
     pub scroll_down: char,
+    /// Opens the debrief pane from the board. `#[serde(default)]` on the
+    /// struct means an existing tui.toml without this key still parses.
+    pub debrief: char,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -48,7 +51,7 @@ impl Default for TuiConfig {
 }
 impl Default for Keys {
     fn default() -> Self {
-        Self { quit: 'q', next_pane: '\t', confirm_merge: 'm', cancel_delegation: 'x', scroll_up: 'k', scroll_down: 'j' }
+        Self { quit: 'q', next_pane: '\t', confirm_merge: 'm', cancel_delegation: 'x', scroll_up: 'k', scroll_down: 'j', debrief: 'd' }
     }
 }
 impl Default for Theme {
