@@ -380,7 +380,7 @@ export function buildDebrief(deps: BuildDebriefDeps): Debrief {
     const record = sessionById.get(b.sessionId);
     const createdAt = record ? Date.parse(record.created_at) : b.updatedAt;
     const slug = slugBySession.get(b.sessionId) ?? null;
-    const links = linkPlansForSlug(plans, slug, now);
+    const links = linkPlansForSlug(plans, slug, now, b.sessionId);
     for (const link of links) allPlans.set(link.id, link);
 
     rows.push({
@@ -444,23 +444,39 @@ export function buildDebrief(deps: BuildDebriefDeps): Debrief {
  * drift from this one silently.
  */
 export function linkPlansForSlug(
-  fetched: { plans: Array<{ id: string; title: string; status: string; repo: string | null; updated_at: string; progress?: { done: number; total: number; of: string } }>; baseUrl: string },
+  fetched: { plans: Array<{ id: string; title: string; status: string; repo: string | null; session_id?: string | null; updated_at: string; progress?: { done: number; total: number; of: string } }>; baseUrl: string },
   slug: string | null,
   now: number,
+  sessionId?: string | null,
 ): DebriefPlanLink[] {
-  if (!slug) return [];
-  return fetched.plans
-    .filter((p) => p.repo === slug)
-    .filter((p) => {
-      const updated = Date.parse(p.updated_at);
-      return Number.isFinite(updated) && now - updated <= PLAN_STALENESS_MS;
-    })
-    .map((p) => ({
-      id: p.id,
-      title: p.title,
-      status: p.status,
-      progress: p.progress ?? { done: 0, total: 0, of: "body" },
-      url: `${fetched.baseUrl}/#${p.id}`,
-      match: "repo" as const,
-    }));
+  const fresh = (p: { updated_at: string }) => {
+    const updated = Date.parse(p.updated_at);
+    return Number.isFinite(updated) && now - updated <= PLAN_STALENESS_MS;
+  };
+  const link = (
+    p: { id: string; title: string; status: string; progress?: { done: number; total: number; of: string } },
+    match: "repo" | "session",
+  ): DebriefPlanLink => ({
+    id: p.id,
+    title: p.title,
+    status: p.status,
+    progress: p.progress ?? { done: 0, total: 0, of: "body" },
+    url: `${fetched.baseUrl}/#${p.id}`,
+    match,
+  });
+
+  // A session link is a FACT -- this session created this plan. A repo match
+  // is a guess that happens to be useful: every session in the repo gets the
+  // same plans. So a session-linked plan is reported as such and is never
+  // also reported as a repo match, which would weaken a strong claim.
+  const sessionLinked = sessionId
+    ? fetched.plans.filter((p) => p.session_id === sessionId).filter(fresh)
+    : [];
+  const sessionLinkedIds = new Set(sessionLinked.map((p) => p.id));
+
+  const repoMatched = slug
+    ? fetched.plans.filter((p) => p.repo === slug && !sessionLinkedIds.has(p.id)).filter(fresh)
+    : [];
+
+  return [...sessionLinked.map((p) => link(p, "session")), ...repoMatched.map((p) => link(p, "repo"))];
 }

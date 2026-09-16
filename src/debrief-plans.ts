@@ -52,6 +52,11 @@ interface PlansApiPlan {
   title: string;
   status: string;
   repo: string | null;
+  /** Which session created this plan, when the creating tool knew. Optional
+   *  because the 89 plans that predate the field carry null, and because a
+   *  plan created from a context with no session is legitimately
+   *  unattributed. */
+  session_id?: string | null;
   updated_at: string;
   progress?: { done: number; total: number; of: string };
 }

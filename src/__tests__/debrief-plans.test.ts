@@ -92,3 +92,57 @@ describe("linkPlansForSlug", () => {
     expect(linkPlansForSlug({ plans: [bad], baseUrl: "http://x" }, "github.com/perintyler/barry-dev", NOW)).toHaveLength(0);
   });
 });
+
+describe("session-linked plans outrank repo matches", () => {
+  const base = {
+    baseUrl: "http://plans.test",
+    plans: [
+      { id: "p1", title: "Created by this session", status: "in-progress", repo: "github.com/o/r",
+        session_id: "sess-1", updated_at: new Date().toISOString() },
+      { id: "p2", title: "Just in the same repo", status: "draft", repo: "github.com/o/r",
+        session_id: null, updated_at: new Date().toISOString() },
+    ],
+  };
+  const now = Date.now();
+
+  it("reports a plan the session created as match: session", () => {
+    const links = linkPlansForSlug(base, "github.com/o/r", now, "sess-1");
+    const created = links.find((l) => l.id === "p1");
+
+    expect(created?.match).toBe("session");
+  });
+
+  it("never reports the same plan twice", () => {
+    // p1 matches BOTH the session and the repo. Reporting it under both would
+    // duplicate the row and weaken a strong claim with a vague one beside it.
+    const links = linkPlansForSlug(base, "github.com/o/r", now, "sess-1");
+
+    expect(links.filter((l) => l.id === "p1")).toHaveLength(1);
+    expect(links.map((l) => l.id).sort()).toEqual(["p1", "p2"]);
+  });
+
+  it("still reports repo matches for plans this session did not create", () => {
+    const links = linkPlansForSlug(base, "github.com/o/r", now, "sess-1");
+
+    expect(links.find((l) => l.id === "p2")?.match).toBe("repo");
+  });
+
+  it("falls back to repo-only matching when the session is unknown", () => {
+    // Every plan created before this field existed, and every plan created
+    // from a context with no session. Both must keep working.
+    const links = linkPlansForSlug(base, "github.com/o/r", now, null);
+
+    expect(links).toHaveLength(2);
+    expect(links.every((l) => l.match === "repo")).toBe(true);
+  });
+
+  it("links a session's plan even when the repo does not match", () => {
+    // A session link is a fact about authorship and does not depend on where
+    // the session happens to be working.
+    const elsewhere = { ...base, plans: [{ ...base.plans[0], repo: "github.com/other/repo" }] };
+    const links = linkPlansForSlug(elsewhere, "github.com/o/r", now, "sess-1");
+
+    expect(links).toHaveLength(1);
+    expect(links[0].match).toBe("session");
+  });
+});
